@@ -1,3 +1,13 @@
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <ctype.h>
+#include <time.h>
+#include <unistd.h>
+#include <pthread.h>
 #include <iostream>
 #include <stdlib.h>
 #include <stdio.h>
@@ -7,12 +17,17 @@
 #include <map>
 #include <iterator>
 
+#define MAXBUF 1024
+
 /* The Id, the ip address and the listening port of the currently running
 process.
 */
 int current_process_Id;
 std::string current_process_address;
 int current_process_port;
+
+int nClient;
+int nFDList[1000];
 
 /*
 The file that is being read in to set up all the processes going to be ran.
@@ -73,6 +88,81 @@ void setup(int argument)
 
 }
 
+void *clientHandler (void *ptr) {
+
+	int nDesc = *((int*) ptr);
+
+	printf("Client handler activated for FD %d\n", nDesc);
+
+	char buff[MAXBUF];
+
+	int len;
+
+	while (1) {
+		if ((len = read(nDesc, buff, MAXBUF)) > 0) {
+			printf("%s\n", buff);
+
+			int i;
+			for (i = 0; i < nClient; i++) {
+				if (nDesc != nFDList[i])
+					write (nFDList[i], buff, strlen(buff) + 1);
+			}
+		}
+	}
+
+}
+
+/*
+Connect to a process.
+*/
+int connect(char *host, process p) {
+	struct hostent *hp;
+	unsigned int alen;
+	struct sockaddr_in myaddr;
+	struct sockaddr_in servaddr;
+	int fd = p.pid;
+
+	printf("conn(host=\"%s\", port=\"%d)\n", host, p.port);
+
+	if ((fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+		 printf("cannot create socket");
+		 return 0;
+	}
+
+	memset((char *) &myaddr, 0, sizeof(myaddr));
+	myaddr.sin_family = AF_INET;
+	myaddr.sin_addr.s_addr = htonl(INADDR_ANY);
+	myaddr.sin_port = htons(current_process_port);
+
+	if (bind(fd, (struct sockaddr *)&myaddr, sizeof(myaddr)) < 0) {
+		printf("bind failed");
+		return 0;
+	}
+
+	memset((char*)&servaddr, 0, sizeof(servaddr));
+	servaddr.sin_family = AF_INET;
+	servaddr.sin_port = htons(p.port);
+
+	hp = gethostbyname(host);
+	if (!hp) {
+		fprintf(stderr, "could not obtain address of %s\n", host);
+		return 0;
+	}
+
+	memcpy((void *)&servaddr.sin_addr, hp->h_addr_list[0], hp->h_length);
+
+	if (connect(fd, (struct sockaddr *)&servaddr, sizeof(servaddr)) < 0) {
+		printf("connect failed");
+		return 0;
+	}
+	return fd;
+}
+
+void disconnect(int &fd) {
+	printf("Disconnecting\n");
+	shutdown(fd, 2);
+}
+
 /*
 The argument given to the main function from the command line is the process id
 we want to give to this current process running the program. For instance, we
@@ -84,6 +174,14 @@ file.
 */
 int main(int argc, char **argv)
 {
+	char buf[MAXBUF];
+	nClient = 0;
+
+  int n, s, ns, len;
+	struct sockaddr_in name;
+	int nClientFileDescriptor = -1;
+	const char *host = "localhost";
+
 	/*
 	error checking to make sure the argument given is actually in the range of
 	processes we want to execute. argv[1] is where the actual argument from
@@ -109,5 +207,60 @@ int main(int argc, char **argv)
 	std::cout << "I am number: " << current_process_Id << std::endl;
 	std::cout << "My address is: " << current_process_address << std::endl;
 	std::cout << "I am listening on port: " << current_process_port << std::endl;
+
+	if ((s = socket (AF_INET, SOCK_STREAM, 0)) < 0) {
+		printf("socket");
+		exit (1);
+	}
+
+	int flag = 1;
+	setsockopt(s,
+		IPPROTO_TCP,
+		TCP_NODELAY,
+		(char *) &flag,
+		sizeof(int));
+
+	memset (&name, 0, sizeof (struct sockaddr_in));
+	name.sin_family = AF_INET;
+	name.sin_port = htons (current_process_port);
+	len = sizeof (struct sockaddr_in);
+
+	inet_pton(AF_INET, current_process_address.c_str(), &name.sin_addr);
+	//memcpy(&name.sin_addr, &current_process_address, sizeof (long));
+
+	if (bind (s, (struct sockaddr *) &name, len) < 0) {
+		printf("bind\n");
+		exit(1);
+	}
+
+	while (1) {
+		if (listen(s, 5) < 0) {
+			printf("listen");
+			exit(1);
+		}
+		if ((nClientFileDescriptor = accept(s, (struct sockaddr *) &name, (socklen_t *) &len)) < 0) {
+			printf("accept");
+			exit(1);
+		}
+
+		nFDList[nClient++] = nClientFileDescriptor;
+
+		pthread_t thread;
+
+		pthread_create(&thread, NULL, clientHandler, (void*) &nClientFileDescriptor);
+	}
+
+	if (current_process_Id != 1) {
+		for (auto it = process_list.begin(); it != process_list.find(current_process_Id); ++it) {
+			if (it->first != current_process_Id) {
+				std::cout << "pid: " << it->second.pid << std::endl;
+				if (!(nClientFileDescriptor = connect((char*) host, it->second))) {
+					exit(1);
+				}
+                                printf("Connected Successfully");
+			}
+		}
+	}
+
 	return 0;
 }
